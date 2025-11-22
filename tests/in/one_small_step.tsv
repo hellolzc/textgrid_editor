@@ -1,0 +1,42 @@
+start	end	dur	speaker	text
+0	1954	1954	sounding	sounding
+0	1953	1953	sentences	  I'm at the foot of the ladder.
+1953	2642	689	sentences	 
+1954	2642	688	sounding	silent
+2642	4674	2032	sounding	sounding 
+2642	19174	16532	sentences	The LM footpads are only depressed in the surface about 1 or 2 inches, although the surface appears to be very, very fine grained, as you get close to it.
+4674	5986	1312	sounding	silent
+4831			event	噪声（测试中文）
+5986	6370	384	sounding	sounding
+6370	7012	642	sounding	silent
+7012	9210	2198	sounding	sounding
+9210	10098	888	sounding	silent
+10098	11204	1106	sounding	sounding
+11204	11666	462	sounding	silent
+11666	13766	2100	sounding	sounding
+13766	14626	860	sounding	silent
+14626	15002	376	sounding	sounding
+15002	16170	1168	sounding	silent
+16170	16554	384	sounding	sounding
+16554	17042	488	sounding	silent  
+17042	19170	2128	sounding	sounding
+19170	19314	144	sounding	sounding
+19174	20886	1712	sentences	It's almost like a powder.
+19314	19658	344	sounding	silent
+19658	20794	1136	sounding	sounding
+20794	22010	1216	sounding	silent  
+22010	23954	1944	sounding	sounding
+22010	23954	1944	sentences	Down there, it's very fine.
+23954	36298	12344	sounding	silent
+23954	36298	12344	sentences	  
+30964			event	""noise""abc
+36298	37642	1344	sounding	sounding
+36298	37643	1345	sentences	I'm going to step off the LM now.
+37642	47459	9817	sounding	silent
+47410	54898	7488	sentences	That's one small step for man, one giant leap for mankind.
+47459	49530	2071	sounding	sounding
+49530	52506	2976	sounding	silent
+52506	52666	160	sounding	sounding
+52666	53546	880	sounding	silent
+53546	54898	1352	sounding	sounding
+54898	55500	602	sounding	silent
