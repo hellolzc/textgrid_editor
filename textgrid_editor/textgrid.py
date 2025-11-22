@@ -4,8 +4,9 @@
 '''A tool to process Praat TextGrids.
 
 1. Read and parse the TextGrid format files used by the Praat.
-2. Converting between TextGrids and pandas DataFrames
-3. TODO:支持处理非标准的TextGrid文件, 并修复存在的错误
+2. Converting between TextGrids and pandas DataFrames.
+3. Resize a TextGrid; Concat two textgrid.
+4. TODO:支持处理非标准的TextGrid文件, 并修复存在的错误
 
 '''
 
@@ -267,6 +268,57 @@ class IntervalTier(object):
         return IntervalTier(name, interval_df)
 
 
+    def resize_tier(self, start_time=0.0, stop_time=None, append=False, auto_extend=False):
+        ''' Resize the content of a tier, the end time must be specified.
+        (1) If stop_time is shorter than a tier's end time, the content of that tier will be truncated. 
+        (2) If stop_time exceeds the tier end, the tier end is used by default.
+        When append=True, empty intervals are appended; when append=False, tier duration will be based on the interval duration.
+        If both append=True and auto_extend=True, the last interval is extended if it is empty.
+        '''
+        assert stop_time
+        assert start_time < stop_time , "start time is bigger than stop time!"
+        interval_df1 = self.intervals
+        mask = (interval_df1.xmin < stop_time) & (interval_df1.xmax > start_time)
+        interval_df2 = interval_df1[mask].reset_index(drop=True)
+        # 时间偏移, 起点会被修正为0.0（截断第一个interval）
+        interval_df2.xmin = interval_df2.xmin - start_time
+        interval_df2.xmax = interval_df2.xmax - start_time
+        interval_df2.loc[0, 'xmin'] = 0.0
+        # 处理结尾
+        item_xmax = stop_time - start_time
+        total_rows = len(interval_df2)
+        last_interval_xmax = interval_df2.loc[total_rows-1, 'xmax']
+
+        if item_xmax < last_interval_xmax:
+            # 截断最后一个interval
+            interval_df2.loc[total_rows-1, 'xmax'] = item_xmax
+        elif item_xmax > last_interval_xmax:
+            if append:
+                if auto_extend and (interval_df2.loc[total_rows-1, 'text'].strip() in ['sil', '', '<NOISE>']):
+                    # 延长最后一个interval
+                    interval_df2.loc[total_rows-1, 'xmax'] = item_xmax
+                else:
+                    # 追加空白interval
+                    interval_df2.loc[total_rows] = [last_interval_xmax, item_xmax, '']
+                    total_rows += 1
+            else:
+                # 结束时间以最后一个interval为准
+                item_xmax = last_interval_xmax
+
+        return IntervalTier(self.name, interval_df2)
+
+    def concat_a_tier(self, item2, offset):
+        assert self.name == item2.name, "item names mismatch! %s!=%s"%(self.name, item2.name)
+        assert self.xmax == offset, 'time mismatch!'
+        interval_df1 = self.intervals
+        interval_df2 = item2.intervals.copy()
+        assert interval_df1.iloc[-1]['xmax'] == offset, "end time of last interval don't match end time of the tier"
+        interval_df2.xmin = interval_df2.xmin + offset
+        interval_df2.xmax = interval_df2.xmax + offset
+        new_interval_df = pd.concat([interval_df1, interval_df2], ignore_index=True)
+        return IntervalTier(self.name, new_interval_df)
+
+
 class TextTier(object):
     """
     Represents Praat TextTiers.
@@ -421,6 +473,26 @@ class TextTier(object):
             'text': table_df['text']
         }).reset_index(drop=True)
         return TextTier(name, point_df, xmin, xmax)
+
+
+    def resize_tier(self, start_time=0.0, stop_time=None, append=False, auto_extend=False):
+        ''' Resize the content of a tier, the end time must be specified.'''
+        assert stop_time
+        assert start_time < stop_time , "start time is bigger than stop time!"
+        points_df1 = self.points
+        mask = (points_df1.xmin < stop_time) & (points_df1.xmin > start_time)
+        points_df2 = points_df1[mask].reset_index(drop=True)
+        # 时间偏移, 起点会被修正为0.0（截断第一个interval）
+        points_df2.xmin = points_df2.xmin - start_time
+        return TextTier(self.name, points_df2)
+
+    def concat_a_tier(self, item2, offset):
+        assert self.name == item2.name, "item names mismatch! %s!=%s"%(self.name, item2.name)
+        point_df1 = self.points
+        point_df2 = item2.points.copy()
+        point_df2.xmin = point_df2.xmin + offset
+        new_point_df = pd.concat([point_df1, point_df2], ignore_index=True)
+        return TextTier(self.name, new_point_df)
 
 
 class TextGrid(object):
@@ -663,3 +735,32 @@ item []:
         tg = TextGrid(tier_list)
 
         return tg
+
+    def resize_textgrid(self, start_time=None, stop_time=None):
+        """ resize the textgrid to specified duration.
+        """
+        out_tier_list = []
+        for indx, tier in enumerate(self.tiers):
+            out_tier_list.append(tier.resize_tier(start_time=start_time, stop_time=stop_time, append=True, auto_extend=True))
+
+        return TextGrid(out_tier_list)
+
+    def concat_a_textgrid(self, tg2):
+        """ concatenate self with another TextGrid, return a TextGrid.
+            Parameter:
+                self: TextGrid
+                tg2: TextGrid
+            Return:
+                out_tg: TextGrid
+        """
+        offset = self.xmax
+        f_xmin = 0.0
+        f_xmax = offset + tg2.xmax
+
+        out_tier_list = []
+
+        for indx, tier in enumerate(self.tiers):
+            new_item = tier.concat_tier(tg2.tiers[indx], offset)
+            out_tier_list.append(new_item)
+
+        return TextGrid(out_tier_list)
