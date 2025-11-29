@@ -6,16 +6,16 @@
 1. Read and parse the TextGrid format files used by the Praat.
 2. Converting between TextGrids and pandas DataFrames.
 3. Resize a TextGrid; Concat two textgrid.
-4. TODO:支持处理非标准的TextGrid文件, 并修复存在的错误
 
 '''
 
-from typing import List
+from typing import List, Dict, Optional, Any
 import re
 import copy
+import logging
 import pandas as pd
 
-# 定义文件头格式和intervals格式
+# Define Regex patterns for file headers and interval/point formats
 intRegex = r'([0-9]+)'
 floatRegex = r'([-+]?[0-9]*\.?[0-9]+)'
 
@@ -47,42 +47,31 @@ pointsRegex = r'''points \['''+ intRegex + r'''\]:\s*
 
 
 
-LOG_LEVEL = 2
-LEVEL_DICT = {
-    'DEBUG':0,
-    'INFO':1,
-    'WARNING':2,
-    'ERROR':3
-}
-
-def _log(level, string):
-    level = level.upper()
-    level_num = LEVEL_DICT[level]
-    if level_num >= LOG_LEVEL:
-        print(level + ':' + string)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 
 
 class IntervalTier(object):
     """
-    Represents Praat IntervalTiers.
+    Represents a Praat IntervalTier.
 
-    This class store all data in self.data, which is a dict.
-    Intervals are store in panda DataFrames.
-    {
-        'class': "IntervalTier"
-        'name' : string
-        'xmin': float
-        'xmax': float
-        'size': int
-        'intervals' : panda DataFrame: 3 columns : xmin, xmax, text
-    }
+    This class manages time-aligned text intervals. The core data is stored 
+    in a pandas DataFrame for efficient manipulation.
 
+    Attributes:
+        name (str): The name of the tier (e.g., "words", "phones").
+        intervals (pd.DataFrame): A DataFrame with columns ['xmin', 'xmax', 'text'].
     """
 
     def __init__(self, name='', interval_df=None):
-        """Construct IntervalTier with name and interval_df
-        interval_df: panda DataFrame: 3 columns : xmin, xmax, text
+        """
+        Initialize the IntervalTier.
+
+        Args:
+            name (str): The name of the tier.
+            interval_df (pd.DataFrame, optional): A DataFrame containing existing intervals.
+                Must have columns ['xmin', 'xmax', 'text']. Defaults to an empty DataFrame.
         """
         self.name = name
         self.intervals = interval_df
@@ -90,6 +79,20 @@ class IntervalTier(object):
             self.intervals = pd.DataFrame(columns=['xmin', 'xmax', 'text'])
 
     def to_dict(self):
+        """
+        Convert the Tier object into a dictionary representation.
+
+        Returns:
+            dict: A dictionary containing class metadata and the intervals DataFrame.
+                {
+                    'class': "IntervalTier"
+                    'name' : string
+                    'xmin': float
+                    'xmax': float
+                    'size': int
+                    'intervals' : panda DataFrame: 3 columns : xmin, xmax, text
+                }
+        """
         self.data = {
                 'class': "IntervalTier",
                 'name' : self.name,
@@ -100,43 +103,67 @@ class IntervalTier(object):
         }
 
     def __copy__(self):
-        return self.__init__(name=self.name, interval_df=self.intervals.copy())
+        """
+        Create a shallow copy of the object, but deep copy the DataFrame 
+        to ensure data independence.
+        """
+        return IntervalTier(name=self.name, interval_df=self.intervals.copy())
 
     @property
     def xmin(self):
+        """
+        Get the start time of the IntervalTier.
+
+        Returns:
+            float or None: The xmin of the first interval, or None if empty.
+        """
         if len(self.intervals) == 0:
             return None
         return self.intervals.iloc[0]['xmin']
     
     @property
     def xmax(self):
+        """
+        Get the end time of the IntervalTier.
+
+        Returns:
+            float or None: The xmax of the last interval, or None if empty.
+        """
         if len(self.intervals) == 0:
             return None
         return self.intervals.iloc[-1]['xmax']
 
     @property
     def size(self):
+        """
+        Get the number of intervals in the tier.
+
+        Returns:
+            int: The count of intervals.
+        """
         return len(self.intervals)
 
     @staticmethod
     def parse_tier(ftext):
-        """ parse text, return a dict.
-            Parameter:
-                ftext: string
-            Return:
-                tier: a object of IntervalTier:
-                    {
-                        'class': "IntervalTier"
-                        'name' : string
-                        'xmin': float
-                        'xmax': float
-                        'size': int
-                        'intervals' : panda DataFrame: 3 columns : xmin, xmax, text
-                    }
+        """
+        Parse a raw string from a Praat TextGrid file to create an IntervalTier object.
+
+        This method extracts header information and interval data using regex, 
+        validates the timeline integrity, and loads the data into a DataFrame.
+
+        Args:
+            ftext (str): The raw text string defining a single Tier from a TextGrid file.
+
+        Returns:
+            IntervalTier: An instance of the class populated with parsed data.
+
+        Raises:
+            Exception: If headers are missing, the tier type is unsupported, 
+                       or parsing fails.
         """
         match = re.search(tierHeadRegex, ftext)
         if match is None:
-            _log('ERROR', "Tier Head Not Found! ")
+            logger.error("Tier Head Not Found! ")
             raise Exception("No Tier Head")
 
         class_name = match.group(2)
@@ -158,38 +185,49 @@ class IntervalTier(object):
         interval_df = pd.DataFrame(columns=['xmin', 'xmax', 'text'])
 
         if size > 0:
+            # Find all interval matches in the text
             all_matchs = re.findall(intervalsRegex, ftext) # , flags=re.DOTALL|re.MULTILINE
-            #print(all_matchs)
             assert all_matchs , "intervals not found."
+
             for row_id, match_tuple in enumerate(all_matchs):
-                #print(match_tuple)
                 no = match_tuple[0]
                 xmin = float(match_tuple[1])
                 xmax = float(match_tuple[2])
                 text = match_tuple[3]
+                
+                # Validation: Start time cannot be greater than end time
                 if xmax < xmin:
-                    _log('Error', "intervals time error, xmin %f > xmax %f"%(xmin, xmax))
+                    logger.error("intervals time error, xmin %f > xmax %f"%(xmin, xmax))
                     raise Exception("File Not Read")
                 interval_df.loc[row_id] = [xmin, xmax, text]
+                
+                # Validation: Ensure continuity (no overlapping backwards in time)
                 if (row_id > 0):
                     last_xmax = interval_df.loc[row_id-1, 'xmax'] 
                     if last_xmax > xmin:
-                        _log('Error', "intervals time error, last xmax %f > this xmin %f"%(last_xmax, xmin))
+                        logger.error("intervals time error, last xmax %f > this xmin %f"%(last_xmax, xmin))
                         raise Exception("File Not Read")
             itemDict['intervals'] = interval_df
             if row_id+1 != size:
-                _log('Warning', "intervals number error, '%s' should have %d interval, get %d interval"%(name, size, row_id+1))
+                logger.warning("intervals number mismatch, '%s' should have %d interval, get %d interval"%(name, size, row_id+1))
 
         tier = IntervalTier(name, interval_df)
+        
+        # Verify the parsed boundaries match the header boundaries
         if tier.xmin != itemDict['xmin']:
-            _log('Error', "intervals time error, first xmin %f != tier.xmin %f"%(tier.xmin, itemDict['xmin']))
+            logger.warning("intervals time mismatch, first xmin %f != tier.xmin %f"%(tier.xmin, itemDict['xmin']))
         if tier.xmax != itemDict['xmax']:
-            _log('Error', "intervals time error, last xmax %f != tier.xmax %f"%(tier.xmax, itemDict['xmax']))
+            logger.warning("intervals time mismatch, last xmax %f != tier.xmax %f"%(tier.xmax, itemDict['xmax']))
 
         return tier
 
     def to_tier_ftext(self):
-        "convert a tier to text, return ftext"
+        """
+        Convert the IntervalTier object back into Praat-formatted text.
+
+        Returns:
+            str: A formatted string suitable for writing to a .TextGrid file.
+        """
         ftext = ''
         ftext += '''        class = "IntervalTier"
         name = "%s"
@@ -209,12 +247,24 @@ class IntervalTier(object):
         return ftext
 
     @staticmethod
-    def fill_interval_df_gaps(df, tier_xmin=None, tier_xmax=None, item_name=''):
-        """ Repair the TextGrid interval tier. Fill in the missing Intervals.
-        Possible missing parts include missing headers, missing tails, and missing parts in the middle.
+    def fill_interval_df_gaps(df, tier_xmin=None, tier_xmax=None, tier_name=''):
         """
-        # 添加缺失的interval
-        # print(df)
+        Repair a TextGrid interval DataFrame by filling in missing time gaps.
+
+        This ensures the timeline is continuous from start to end. 
+        It inserts empty intervals ('') where gaps exist between defined intervals.
+
+        Args:
+            df (pd.DataFrame): The original intervals DataFrame.
+            tier_xmin (float, optional): The global start time for the tier. Defaults to first interval xmin.
+            tier_xmax (float, optional): The global end time for the tier. Defaults to last interval xmax.
+            tier_name (str, optional): Name of the tier for logging purposes.
+
+        Returns:
+            pd.DataFrame: A new DataFrame with no time gaps between intervals.
+        """
+        # Fill in the missing Intervals.
+        # Possible missing parts include missing headers, missing tails, and missing parts in the middle.
         df2 = df.copy()
         total_rows = len(df)
         total_rows2 = total_rows
@@ -230,7 +280,7 @@ class IntervalTier(object):
             interval_xmax = df.loc[indx, 'xmax']
             interval_text = df.loc[indx, 'text']
             if interval_xmin > last_interval_xmax:
-                print("Info", "'%s' %f-%f: insert a empty interval." % (item_name, last_interval_xmax, interval_xmin))
+                logger.info("'%s' %f-%f: insert a empty interval." % (tier_name, last_interval_xmax, interval_xmin))
                 df2.loc[indx2, :] = [last_interval_xmax, interval_xmin, '']
                 indx2 += 1
                 total_rows2 += 1
@@ -238,76 +288,136 @@ class IntervalTier(object):
             last_interval_xmax = interval_xmax
             indx += 1
             indx2 += 1
-        # 尾部缺失 单独处理
+
+        # Handle trailing gap
         if tier_xmax is not None and (tier_xmax > last_interval_xmax):
-            print("Info", "'%s' %f-%f: insert a empty interval." % (item_name, last_interval_xmax, tier_xmax))
+            logger.info("'%s' %f-%f: insert a empty interval." % (tier_name, last_interval_xmax, tier_xmax))
             df2.loc[indx2, :] = [last_interval_xmax, tier_xmax, '']
             indx2 += 1
             total_rows2 += 1
-        # print(df2)
+
         return df2
 
 
-    def to_table_df(self):
-        mask = self.intervals.text != ''
+    def to_table_df(self, include_empty_intervals=False):
+        """
+        Convert the Tier data into a simplified Pandas DataFrame.
+
+        Args:
+            include_empty_intervals (bool): If False, rows with empty text ('') 
+                                            will be removed.
+
+        Returns:
+            tuple: (DataFrame, name, xmin, xmax, size)
+                   The DataFrame contains columns ['tmin', 'tmax', 'text'].
+        """
         table_df = pd.DataFrame(data={
-                    'tmin': self.intervals.loc[mask, 'xmin'],
-                    'tmax': self.intervals.loc[mask, 'xmax'],
-                    'text': self.intervals.loc[mask, 'text']
+                    'tmin': self.intervals['xmin'],
+                    'tmax': self.intervals['xmax'],
+                    'text': self.intervals['text']
                 })
+        if not include_empty_intervals:
+            mask = self.intervals.text != ''
+            table_df = table_df.loc[mask].reset_index(drop=True)
         return table_df, self.name, self.xmin, self.xmax, self.size
 
     @staticmethod
     def from_table_df(table_df, name='', xmin=None, xmax=None):
+        """
+        Reconstruct an IntervalTier from a simplified DataFrame.
+
+        This method will automatically repair gaps between intervals using 
+        `fill_interval_df_gaps`.
+
+        Args:
+            table_df (pd.DataFrame): Must contain ['tmin', 'tmax', 'text'].
+            name (str): Name of the tier.
+            xmin (float): Start time of the tier.
+            xmax (float): End time of the tier.
+
+        Returns:
+            IntervalTier: The reconstructed tier object.
+        """
         interval_df = pd.DataFrame(data={
             'xmin': table_df['tmin'],
             'xmax': table_df['tmax'],
             'text': table_df['text']
         }).reset_index(drop=True)
-        interval_df = IntervalTier.fill_interval_df_gaps(interval_df, tier_xmin=xmin, tier_xmax=xmax)
+        interval_df = IntervalTier.fill_interval_df_gaps(interval_df, tier_xmin=xmin, tier_xmax=xmax, tier_name=name)
         return IntervalTier(name, interval_df)
 
 
     def resize_tier(self, start_time=0.0, stop_time=None, append=False, auto_extend=False):
-        ''' Resize the content of a tier, the end time must be specified.
+        """
+        Crop and resize the tier to a specific time range. The end time must be specified.
+        This method shifts timestamps so the new start_time becomes 0.0.
+
         (1) If stop_time is shorter than a tier's end time, the content of that tier will be truncated. 
         (2) If stop_time exceeds the tier end, the tier end is used by default.
         When append=True, empty intervals are appended; when append=False, tier duration will be based on the interval duration.
         If both append=True and auto_extend=True, the last interval is extended if it is empty.
-        '''
+
+        Args:
+            start_time (float): The absolute time to start cropping from.
+            stop_time (float): The absolute time to stop cropping. Must be provided.
+            append (bool): If True, allows adding empty intervals if the stop_time 
+                           extends beyond existing data.
+            auto_extend (bool): If True (and append is True), extends the last 
+                                existing interval instead of adding a new empty one,
+                                provided the last interval is silence/noise.
+
+        Returns:
+            IntervalTier: A new, resized IntervalTier object.
+        """
         assert stop_time
         assert start_time < stop_time , "start time is bigger than stop time!"
         interval_df1 = self.intervals
+        
+        # Select intervals that overlap with the desired time range
         mask = (interval_df1.xmin < stop_time) & (interval_df1.xmax > start_time)
         interval_df2 = interval_df1[mask].reset_index(drop=True)
         # 时间偏移, 起点会被修正为0.0（截断第一个interval）
         interval_df2.xmin = interval_df2.xmin - start_time
         interval_df2.xmax = interval_df2.xmax - start_time
         interval_df2.loc[0, 'xmin'] = 0.0
-        # 处理结尾
+        
+        # Calculate expected new duration
         item_xmax = stop_time - start_time
         total_rows = len(interval_df2)
         last_interval_xmax = interval_df2.loc[total_rows-1, 'xmax']
 
+        # Handle the tail end of the tier
         if item_xmax < last_interval_xmax:
-            # 截断最后一个interval
+            # Case 1: Truncate the last interval (cut it short)
             interval_df2.loc[total_rows-1, 'xmax'] = item_xmax
         elif item_xmax > last_interval_xmax:
             if append:
+                # Case 2: Desired length is longer than data. Extend.
                 if auto_extend and (interval_df2.loc[total_rows-1, 'text'].strip() in ['sil', '', '<NOISE>']):
-                    # 延长最后一个interval
+                    # If last interval is silence, just stretch it
                     interval_df2.loc[total_rows-1, 'xmax'] = item_xmax
                 else:
-                    # 追加空白interval
+                    # Otherwise, append a new empty interval
                     interval_df2.loc[total_rows] = [last_interval_xmax, item_xmax, '']
                     total_rows += 1
             else:
-                # 结束时间以最后一个interval为准
+                # Case 3: Do not extend, just clamp to existing data end
                 item_xmax = last_interval_xmax
 
         return IntervalTier(self.name, interval_df2)
 
     def concat_a_tier(self, item2, offset):
+        """
+        Concatenate another tier to the end of this one.
+
+        Args:
+            item2 (IntervalTier): The tier to append.
+            offset (float): The time offset to add to item2's timestamps 
+                            (usually self.xmax).
+
+        Returns:
+            IntervalTier: A combined tier.
+        """
         assert self.name == item2.name, "item names mismatch! %s!=%s"%(self.name, item2.name)
         assert self.xmax == offset, 'time mismatch!'
         interval_df1 = self.intervals
@@ -321,24 +431,22 @@ class IntervalTier(object):
 
 class TextTier(object):
     """
-    Represents Praat TextTiers.
+    Represents a Praat TextTier (Point Tier).
 
-    This class store all data in self.data, which is a dict.
-    Points are store in panda DataFrames.
-    {
-        'class': "TextTier"
-        'name' : string
-        'xmin': float
-        'xmax': float
-        'size': int
-        'TextTier' : panda DataFrame: 2 columns : xmin(number), text(mark)
-    }
-
+    Unlike IntervalTiers which have ranges, TextTiers represent specific points in time.
+    Data is stored in self.points (pandas DataFrame).
     """
 
     def __init__(self, name='', point_df=None, xmin=None, xmax=None):
-        """Construct TextTier with name and interval_df
-        interval_df: panda DataFrame: 2 columns : xmin(number), text(mark)
+        """
+        Construct a TextTier.
+
+        Args:
+            name (str): Name of the tier.
+            point_df (pd.DataFrame): DataFrame with columns ['xmin', 'text']. 
+                                     Note: 'xmin' here represents the point's time 'number'.
+            xmin (float): Global start time of the tier.
+            xmax (float): Global end time of the tier.
         """
         self.name = name
         self.points = point_df
@@ -348,6 +456,18 @@ class TextTier(object):
             self.points = pd.DataFrame(columns=['xmin', 'text'])
 
     def to_dict(self):
+        """
+        Serialize tier to dictionary.
+            Points are store in a pandas DataFrame.
+            {
+                'class': "TextTier"
+                'name' : string
+                'xmin': float
+                'xmax': float
+                'size': int
+                'TextTier' : panda DataFrame: 2 columns : xmin(number), text(mark)
+            }
+        """
         self.data = {
                 'class': "TextTier",
                 'name' : self.name,
@@ -358,10 +478,12 @@ class TextTier(object):
         }
 
     def __copy__(self):
-        return self.__init__(name=self.name, point_df=self.point_df.copy(), xmin=self.xmin, xmax=self.xmax)
+        """Deep copy the object."""
+        return TextTier(name=self.name, point_df=self.point_df.copy(), xmin=self.xmin, xmax=self.xmax)
 
     @property
     def xmin(self):
+        """Get start time. Returns stored _xmin or time of first point."""
         if self._xmin is not None:
             return self._xmin
         if len(self.points) == 0:
@@ -370,6 +492,7 @@ class TextTier(object):
     
     @property
     def xmax(self):
+        """Get end time. Returns stored _xmax or time of last point."""
         if self._xmin is not None:
             return self._xmin
         if len(self.points) == 0:
@@ -378,27 +501,23 @@ class TextTier(object):
 
     @property
     def size(self):
+        """Number of points in the tier."""
         return len(self.points)
 
     @staticmethod
     def parse_tier(ftext):
-        """ parse text, return a dict.
-            Parameter:
-                ftext: string
-            Return:
-                tier: a object of TextTier:
-                    {
-                        'class': "TextTier"
-                        'name' : string
-                        'xmin': float
-                        'xmax': float
-                        'size': int
-                        'points' : panda DataFrame: 2 columns : xmin(number), text(mark)
-                    }
+        """
+        Parse raw Praat text for a TextTier (PointTier).
+
+        Args:
+            ftext (str): Raw text block for this tier.
+
+        Returns:
+            TextTier: Parsed object.
         """
         match = re.search(tierHeadRegex, ftext)
         if match is None:
-            _log('ERROR', "Tier Head Not Found! ")
+            logger.error("Tier Head Not Found! ")
             raise Exception("No Tier Head")
 
         class_name = match.group(2)
@@ -421,10 +540,8 @@ class TextTier(object):
 
         if size > 0:
             all_matchs = re.findall(pointsRegex, ftext) # , flags=re.DOTALL|re.MULTILINE
-            #print(all_matchs)
             assert all_matchs , "points not found."
             for row_id, match_tuple in enumerate(all_matchs):
-                #print(match_tuple)
                 no = match_tuple[0]
                 xmin = float(match_tuple[1])
                 text = match_tuple[2]
@@ -432,14 +549,14 @@ class TextTier(object):
 
             itemDict['points'] = point_df
             if row_id+1 != size:
-                _log('Warning', "points number error, '%s' should have %d points, get %d points"%(name, size, row_id+1))
+                logger.warning("points number error, '%s' should have %d points, get %d points"%(name, size, row_id+1))
 
         tier = TextTier(name, point_df, xmin=itemDict['xmin'], xmax=itemDict['xmax'])
 
         return tier
 
     def to_tier_ftext(self):
-        "convert a tier to text, return ftext"
+        """Convert object back to Praat text format."""
         ftext = ''
         ftext += '''        class = "TextTier"
         name = "%s"
@@ -458,7 +575,11 @@ class TextTier(object):
         return ftext
 
 
-    def to_table_df(self):
+    def to_table_df(self, include_empty_intervals='unused'):
+        """
+        Convert points to a simplified DataFrame.
+        Note: tmax is None for PointTiers.
+        """
         table_df = pd.DataFrame(data={
                     'tmin': self.points['xmin'],
                     'tmax': None,
@@ -468,6 +589,7 @@ class TextTier(object):
 
     @staticmethod
     def from_table_df(table_df, name='', xmin=None, xmax=None):
+        """Construct TextTier from DataFrame."""
         point_df = pd.DataFrame(data={
             'xmin': table_df['tmin'],
             'text': table_df['text']
@@ -476,17 +598,22 @@ class TextTier(object):
 
 
     def resize_tier(self, start_time=0.0, stop_time=None, append=False, auto_extend=False):
-        ''' Resize the content of a tier, the end time must be specified.'''
+        """ Resize the content of a tier, the end time must be specified.
+        Crop points to be within start_time and stop_time, and shift values 
+        relative to start_time.
+        """
         assert stop_time
         assert start_time < stop_time , "start time is bigger than stop time!"
         points_df1 = self.points
         mask = (points_df1.xmin < stop_time) & (points_df1.xmin > start_time)
         points_df2 = points_df1[mask].reset_index(drop=True)
-        # 时间偏移, 起点会被修正为0.0（截断第一个interval）
+        
+        # Time Offset: Shift timestamps so start_time becomes 0.0
         points_df2.xmin = points_df2.xmin - start_time
         return TextTier(self.name, points_df2)
 
     def concat_a_tier(self, item2, offset):
+        """Combine two TextTiers, shifting the second by offset."""
         assert self.name == item2.name, "item names mismatch! %s!=%s"%(self.name, item2.name)
         point_df1 = self.points
         point_df2 = item2.points.copy()
@@ -497,22 +624,28 @@ class TextTier(object):
 
 class TextGrid(object):
     """
-    A tool to process Praat TextGrids.
-    self.tiers: Items are IntervalTier or TextTier.
-
-    The intervals are store in pandas DataFrames.
+    The main class for processing Praat TextGrids.
+    
+    Attributes:
+        tiers (list): A list containing IntervalTier or TextTier objects.
     """
     def __init__(self, tier_list: List=None):
-        ''' create a empty textgrid dict
-        '''
+        """
+        Initialize a TextGrid.
+        
+        Args:
+            tier_list (list, optional): A list of Tier objects. Defaults to empty list.
+        """
         self.tiers = tier_list
         if not tier_list:
             self.tiers = []
 
 
     def to_dict(self):
-        '''create a empty textgrid dict
-        TextGrid is convert a Python dict, where
+        """
+        Convert the entire TextGrid (including all tiers) to a dictionary.
+        Useful for debugging or JSON serialization.
+
             textGridDict: A dict:
             {
                 'xmin': float
@@ -529,7 +662,7 @@ class TextGrid(object):
                 'size': int
                 'intervals' : pandas DataFrame: 3 columns : xmin, xmax, text
             }
-        '''
+        """
         tier_dict_list = [x.to_dict() for x in self.tiers]
 
         out_tg_dict = {
@@ -541,10 +674,12 @@ class TextGrid(object):
         return out_tg_dict
 
     def __copy__(self):
-        return self.__init__(tier_list=[x.copy() for x in self.tiers])
+        """Deep copy the TextGrid object."""
+        return TextGrid(tier_list=[x.copy() for x in self.tiers])
 
     @property
     def xmin(self):
+        """Global start time (min of all tiers)."""
         if len(self.tiers) == 0:
             return None
         xmin = min((x.xmin for x in self.tiers))
@@ -552,6 +687,7 @@ class TextGrid(object):
     
     @property
     def xmax(self):
+        """Global end time (max of all tiers)."""
         if len(self.tiers) == 0:
             return None
         xmax = max((x.xmax for x in self.tiers))
@@ -559,43 +695,39 @@ class TextGrid(object):
 
     @property
     def size(self):
+        """Number of tiers in the TextGrid."""
         return len(self.tiers)
 
     def add_tier(self, tier_item):
-        ''' add a new tier to TextGrid Dict, return a dict.  '''
+        """Add a new tier object to the TextGrid."""
         self.tiers.append(tier_item)      
 
     @staticmethod
     def parse_textgrid_ftext(ftext):
-        '''parse a praat TextGrid file text, return a dict.
-        Return:
-            textGridDict: A dict contains:
-            {
-                'xmin': float
-                'xmax': float
-                'size': int
-                'tiers':[item1, item2, item3]
-            }
-            itemx is a dict, see above
-        '''
+        """
+        Parse a full Praat TextGrid file string into a TextGrid object.
+        
+        This identifies the file format, splits the text into tier blocks,
+        and delegates parsing to IntervalTier or TextTier methods.
+
+        Args:
+            ftext (str): The complete file content.
+
+        Returns:
+            TextGrid: The parsed object.
+        """
         # 检查文件头
         match = re.search(fileHeadRegex, ftext)
         if match is None:
-            _log('ERROR', "Couldn't find head data of this file!")
+            logger.error("Couldn't find head data of this file!")
             raise Exception("No File Head")
 
         f_xmin = float(match.group(1))
         f_xmax = float(match.group(2))
         f_size = int(match.group(3))
+        f_tiers = []
 
-        textGridDict = {
-                        'xmin': f_xmin,
-                        'xmax': f_xmax,
-                        'size': f_size,
-                        'tiers':[]
-                    }
-
-        # 切割每个item
+        # Identify positions where each tier begins
         tier_start_pos = []
         tier_class_names = []
         pattern = re.compile(tierHeadRegex)
@@ -603,35 +735,33 @@ class TextGrid(object):
         for tier_no in range(f_size):
             match = pattern.search(ftext, pos)
             if match is None:
-                _log('ERROR', "Cannot found Tier %d!"%(tier_no + 1))
+                logger.error("Cannot found Tier %d!"%(tier_no + 1))
                 raise Exception("No Tier")
             tier_start_pos.append(match.start(0))
             tier_class_names.append(match.group(2))
             pos = match.end(0)
 
-        # 处理每个item
+        # Slice the text and parse each tier
         tier_start_pos.append(len(ftext))
-        #print(tier_start_pos)
         for tier_no in range(f_size):
             tier_text = ftext[tier_start_pos[tier_no]:tier_start_pos[tier_no+1]]
-            #print(tier_text)
 
             if tier_class_names[tier_no] == 'IntervalTier':
                 one_item = IntervalTier.parse_tier(tier_text)
             else:  # 
                 one_item = TextTier.parse_tier(tier_text)
-            textGridDict['tiers'].append(one_item)
+            f_tiers.append(one_item)
 
-        tg = TextGrid(tier_list=textGridDict['tiers'])
-        if tg.xmin != textGridDict['xmin']:
-            _log('Error', "TextGrid time error, first xmin %f != file.xmin %f"%(tg.xmin, textGridDict['xmin']))
-        if tg.xmax != textGridDict['xmax']:
-            _log('Error', "TextGrid time error, last xmax %f != file.xmax %f"%(tg.xmax, textGridDict['xmax']))
+        tg = TextGrid(tier_list=f_tiers)
+        if tg.xmin != f_xmin:
+            logger.warning("TextGrid time mismatch, first xmin %f != file.xmin %f"%(tg.xmin, f_xmin))
+        if tg.xmax != f_xmax:
+            logger.warning("TextGrid time mismatch, last xmax %f != file.xmax %f"%(tg.xmax, f_xmax))
 
         return tg
 
     def to_textgrid_ftext(self):
-        "convert to TextGrid file, return ftext"
+        """ Convert the TextGrid object back to a string compatible with Praat files. """
         ftext = '''File type = "ooTextFile"
 Object class = "TextGrid"
 
@@ -649,7 +779,14 @@ item []:
         return ftext
 
     def write_textgrid_file(self, filename, check=True):
-        "write TextGrid file"
+        """
+        Write the TextGrid to a file on disk.
+
+        Args:
+            filename (str): Output path.
+            check (bool): If True, attempts to re-parse the generated text 
+                          to ensure validity before finishing.
+        """
         with open(filename, 'w', encoding='utf-16-be') as f:
             ftext = self.to_textgrid_ftext()
             if check:
@@ -667,18 +804,24 @@ item []:
 
     @staticmethod
     def read_textgrid_file(filename, encoding=None):
-        """ parse a praat TextGrid file, return a dict.
-            Parameter:
-                filename: file name
-            Return:
-                textGridDict
+        """
+        Read a TextGrid file from disk.
+        
+        Auto-detects UTF-16-BE (Praat standard) or GBK encoding.
+        
+        Args:
+            filename (str): Path to file.
+            encoding (str, optional): Force specific encoding.
+
+        Returns:
+            TextGrid: Parsed object.
         """
         # 读取TextGrid文件，检查编码
         if encoding is None:
             try:
                 ftext = TextGrid._read_text_all_lines(filename)
             except UnicodeDecodeError:
-                _log('Warning', "File %s is not encoded with UTF-16-BE! Trying GBK."%filename)
+                logger.warning("File %s is not encoded with UTF-16-BE! Trying GBK."%filename)
                 ftext = TextGrid._read_text_all_lines(filename, 'gbk')
         else:
             ftext = TextGrid._read_text_all_lines(filename, encoding)
@@ -686,11 +829,21 @@ item []:
         return textGridDict
 
 
-    def down_to_table(self, tier_indexes=None):
-        ''' convert a dataframe to TextGrid object.
-        parse a praat TextGrid file text, return a dict.
-        pandas DataFrame: 3 or 4 columns : tmin, tmax, [tier], text 
-        '''
+    def down_to_table(self, tier_indexes=None, include_empty_intervals=False):
+        """
+        Flatten the TextGrid into a single Pandas DataFrame.
+        
+        Useful for analytics. The resulting DataFrame has columns:
+        tmin, tmax, text, and 'tier' (name).
+
+        Args:
+            tier_indexes (list[int], optional): Indices of tiers to include. 
+                                                Defaults to all.
+            include_empty_intervals (bool): Whether to include empty intervals.
+
+        Returns:
+            pd.DataFrame: A combined DataFrame of all selected tiers.
+        """
         if self.size == 0:
             return None
 
@@ -699,33 +852,32 @@ item []:
 
         table_list = []
         for index in tier_indexes:
-            tier_table_df, tier_name, _, _, _ = self.tiers[index].to_table_df()
+            tier_table_df, tier_name, _, _, _ = self.tiers[index].to_table_df(include_empty_intervals)
             tier_table_df['tier'] = tier_name
             table_list.append(tier_table_df)
-            print(tier_table_df)
-        table_df = pd.concat(table_list).sort_values('tmin')
+        table_df = pd.concat(table_list).sort_values('tmin').reset_index(drop=True)
 
         return table_df
 
     @staticmethod
     def create_from_table(table_df, tier_names=None):
-        ''' convert a dataframe to TextGrid object.
-        parse a praat TextGrid file text, return a dict.
-        pandas DataFrame: 3 or 4 columns : tmin, tmax, [tier], text 
-        '''
-        # 每个item
+        """
+        Create a TextGrid object from a flat DataFrame.
+
+        Args:
+            table_df (pd.DataFrame): 4 columns: tmin, tmax, tier, text.
+            tier_names (list[str], optional): Order of selected tier names.
+
+        Returns:
+            TextGrid: The reconstructed object.
+        """
+        # Set tier_names if needed
         if tier_names is None:
-            if 'tier' in table_df:
-                tier_names = table_df['tier'].unique()
-            else:
-                tier_names = ['']
+            tier_names = table_df['tier'].unique()
         
         tier_list = []
         for name in tier_names:
-            if name == '':
-                tier_table_df = table_df
-            else:
-                tier_table_df = table_df.loc[table_df['tier'] == name]
+            tier_table_df = table_df.loc[table_df['tier'] == name]
 
             if tier_table_df['tmax'].isna().all():
                 one_item = TextTier.from_table_df(tier_table_df, name=name)
@@ -737,7 +889,8 @@ item []:
         return tg
 
     def resize_textgrid(self, start_time=None, stop_time=None):
-        """ resize the textgrid to specified duration.
+        """
+        Resize the textgrid to a specific duration.
         """
         out_tier_list = []
         for indx, tier in enumerate(self.tiers):
@@ -746,12 +899,17 @@ item []:
         return TextGrid(out_tier_list)
 
     def concat_a_textgrid(self, tg2):
-        """ concatenate self with another TextGrid, return a TextGrid.
-            Parameter:
-                self: TextGrid
-                tg2: TextGrid
-            Return:
-                out_tg: TextGrid
+        """
+        Concatenate this TextGrid with another one (tg2).
+        
+        The tiers of tg2 are appended to the tiers of this grid.
+        Time in tg2 is shifted by this grid's duration.
+
+        Args:
+            tg2 (TextGrid): The grid to append.
+
+        Returns:
+            TextGrid: A new concatenated grid.
         """
         offset = self.xmax
         f_xmin = 0.0
@@ -760,7 +918,7 @@ item []:
         out_tier_list = []
 
         for indx, tier in enumerate(self.tiers):
-            new_item = tier.concat_tier(tg2.tiers[indx], offset)
+            new_item = tier.concat_a_tier(tg2.tiers[indx], offset)
             out_tier_list.append(new_item)
 
         return TextGrid(out_tier_list)

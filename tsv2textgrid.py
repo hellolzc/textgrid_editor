@@ -4,9 +4,10 @@
 import os
 import sys
 import re
-from textgrid_editor import TextGrid
 import pandas as pd
 
+sys.path.append('./src')
+from textgrid_editor import TextGrid
 # 查找in目录下TSV文件并转换成TextGrid文件
 
 IN_DIR = './tests/in'
@@ -21,18 +22,6 @@ def save_tsv(filepath, df, split='\t'):
     df.to_csv(filepath, sep=split, header=True, index=False, encoding='utf-8', quoting=3)  # csv.QUOTE_NONE (3)
 
 
-def read_and_fill_space_in_tsv(tsv_path):
-    ''' read tsv
-    '''
-    # process one tsv
-    tsv_df = read_tsv(tsv_path)
-    if 'speaker' not in tsv_df.columns:
-        tsv_df['speaker'] = '<X>'
-
-    tsv_df['xmin'] = tsv_df.start/1000
-    tsv_df['xmax'] = tsv_df.end/1000
-
-    return tsv_df_full
 
 
 def convert_file(old_path, out_dir):
@@ -46,6 +35,8 @@ def convert_file(old_path, out_dir):
             tsv_df = read_tsv(old_path)
             if 'speaker' in tsv_df.columns:
                 tsv_df['tier'] = tsv_df['speaker']
+            else:
+                tsv_df['tier'] = 'Text'
             tsv_df['tmin'] = tsv_df.start/1000
             tsv_df['tmax'] = tsv_df.end/1000
             tg = TextGrid.create_from_table(tsv_df)

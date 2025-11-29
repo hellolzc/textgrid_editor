@@ -4,8 +4,10 @@
 import os
 import sys
 import re
-from textgrid_editor import TextGrid
 import pandas as pd
+
+sys.path.append('./src')
+from textgrid_editor import TextGrid
 
 # 查找in目录下TextGrid文件并转换成TSV文件
 
